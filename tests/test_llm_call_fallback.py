@@ -5,6 +5,13 @@ import pytest
 from lib.llm_call import _extract_anthropic_text, detect_provider_from_env, NoProviderError
 
 
+def test_detect_auto_picks_codex_cli_first(clear_ai_env, monkeypatch):
+    monkeypatch.delenv("UDD_DISABLE_CODEX_CLI", raising=False)
+    monkeypatch.setenv("CODEX_CLI_COMMAND", "codex-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "a")
+    assert detect_provider_from_env("auto") == "codex_cli"
+
+
 def test_detect_auto_picks_anthropic_first(clear_ai_env, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "a")
     monkeypatch.setenv("GEMINI_API_KEY", "g")
@@ -28,6 +35,7 @@ def test_detect_explicit_forces_choice(clear_ai_env, monkeypatch):
     # Explicit override — returns what was asked even if its key is missing
     # (actual call will fail elsewhere; detect is about choice only)
     assert detect_provider_from_env("openai") == "openai"
+    assert detect_provider_from_env("codex_cli") == "codex_cli"
 
 
 def test_detect_none_raises(clear_ai_env):

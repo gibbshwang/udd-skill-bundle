@@ -81,6 +81,38 @@ Rules for harness mode:
   if the current helper pipeline cannot model it, stop and report the harness
   limitation instead of silently replacing Stage 3-6 with custom code.
 
+## AI Provider Policy
+
+Generated projects default to `healing.ai_provider: codex_cli`. Runtime
+self-healing therefore calls the locally authenticated Codex CLI as a subprocess
+instead of directly calling Anthropic, Gemini, or OpenAI APIs.
+
+The runtime flow is:
+
+```text
+src/navigate.py find()
+  -> all selectors fail
+  -> src/healer.py captures compact/redacted DOM and optional screenshot
+  -> src/llm_client.py runs `codex exec`
+  -> JSON selector response is validated with Playwright
+  -> selectors.yaml ai_discovered is updated
+```
+
+Windows note: call `codex.cmd`, not `codex.ps1`, because PowerShell execution
+policy can block the `.ps1` shim. The generated client auto-detects
+`%APPDATA%\npm\codex.cmd`, or you can set:
+
+```yaml
+healing:
+  ai_provider: codex_cli
+  codex_cli:
+    command: "C:\\Users\\<user>\\AppData\\Roaming\\npm\\codex.cmd"
+```
+
+Direct external API providers are still available only when explicitly selected
+with `healing.ai_provider: anthropic`, `gemini`, or `openai` and their API keys
+are installed in the run environment.
+
 ## Execution
 
 Invoke each stage in order via Bash. Example:

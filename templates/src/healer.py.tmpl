@@ -29,7 +29,16 @@ def _load_config() -> dict:
         return yaml.safe_load(f)
 
 
-def _compact_dom(page: Page, max_chars: int = 3000) -> str:
+def _redact(value: str, patterns: list[str]) -> str:
+    for pattern in patterns:
+        try:
+            value = re.sub(pattern, "[REDACTED]", value)
+        except re.error:
+            log.warning("heal: invalid redact pattern ignored: %r", pattern)
+    return value
+
+
+def _compact_dom(page: Page, max_chars: int = 3000, redact_patterns: list[str] | None = None) -> str:
     """Best-effort DOM compression — strips scripts, styles, long attrs."""
     html = page.content()
     # Remove script/style blocks
@@ -37,6 +46,7 @@ def _compact_dom(page: Page, max_chars: int = 3000) -> str:
     html = re.sub(r"<style[^>]*>.*?</style>", "", html, flags=re.DOTALL | re.I)
     # Collapse whitespace
     html = re.sub(r"\s+", " ", html)
+    html = _redact(html, redact_patterns or [])
     # Truncate
     if len(html) > max_chars:
         html = html[: max_chars // 2] + " ...[TRUNCATED]... " + html[-max_chars // 2 :]
@@ -87,11 +97,18 @@ def heal(page: Page, element_name: str) -> Locator | None:
         return None
 
     description = entry.get("description", f"Element named '{element_name}'")
-    try:
-        screenshot = page.screenshot(full_page=False)
-    except Exception:
-        screenshot = None
-    dom = _compact_dom(page)
+    healing = config["healing"]
+    screenshot = None
+    if healing.get("include_screenshot", True):
+        try:
+            screenshot = page.screenshot(full_page=False)
+        except Exception:
+            screenshot = None
+    dom = _compact_dom(
+        page,
+        max_chars=healing.get("max_dom_chars", 3000),
+        redact_patterns=healing.get("redact_patterns", []),
+    )
 
     prompt = f"""You are a Playwright selector expert.
 

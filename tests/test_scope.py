@@ -47,4 +47,6 @@ def test_build_config_structure():
     assert cfg["validation"]["expected_columns"] == ["날짜", "매출"]
     assert cfg["auth"]["mode"] == "session_replay"
     assert cfg["healing"]["enabled"] is True
-    assert cfg["healing"]["ai_provider"] == "auto"
+    assert cfg["healing"]["ai_provider"] == "codex_cli"
+    assert cfg["healing"]["codex_cli"]["sandbox"] == "read-only"
+    assert cfg["healing"]["codex_cli"]["timeout_seconds"] == 180

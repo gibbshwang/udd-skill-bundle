@@ -27,7 +27,17 @@ healing:
   enabled: true
   max_ai_retries: 3
   dev_max_attempts: 5
-  ai_provider: auto
+  ai_provider: codex_cli
+  include_screenshot: true
+  max_dom_chars: 3000
+  redact_patterns:
+    - "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}"
+    - "\\b\\d{3}-\\d{2,4}-\\d{4}\\b"
+  codex_cli:
+    command: ""
+    model: ""
+    timeout_seconds: 180
+    sandbox: read-only
   promote_after: 10
   cool_down_hours: 24
   allow_logic_patches: false

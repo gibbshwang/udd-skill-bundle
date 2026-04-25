@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -52,6 +53,8 @@ def detect_chromium_installed() -> bool:
 
 def detect_ai_providers() -> list[str]:
     providers = []
+    if detect_codex_cli_command():
+        providers.append("codex_cli")
     if os.environ.get("ANTHROPIC_API_KEY"):
         providers.append("anthropic")
     if os.environ.get("GEMINI_API_KEY"):
@@ -59,6 +62,28 @@ def detect_ai_providers() -> list[str]:
     if os.environ.get("OPENAI_API_KEY"):
         providers.append("openai")
     return providers
+
+
+def detect_codex_cli_command() -> str | None:
+    if os.environ.get("UDD_DISABLE_CODEX_CLI"):
+        return None
+    override = os.environ.get("CODEX_CLI_COMMAND")
+    if override:
+        return override
+
+    if os.name == "nt":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            candidate = Path(appdata) / "npm" / "codex.cmd"
+            if candidate.exists():
+                return str(candidate)
+        for name in ("codex.cmd", "codex.exe", "codex"):
+            found = shutil.which(name)
+            if found and not found.lower().endswith(".ps1"):
+                return found
+        return None
+
+    return shutil.which("codex")
 
 
 def build_report(
@@ -95,6 +120,7 @@ def build_report(
         "playwright": playwright_version,
         "chromium": chromium_installed,
         "ai_providers": providers,
+        "codex_cli": detect_codex_cli_command(),
         "autonomous_mode": autonomous_mode,
         "os": detect_os(),
         "cli_host": detect_cli_host(),

@@ -16,9 +16,19 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 @pytest.fixture
 def clear_ai_env(monkeypatch):
-    """Remove all three AI provider env vars so tests start from a clean state."""
-    for var in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY"):
+    """Remove AI provider env vars so tests start from a clean state."""
+    for var in (
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "OPENAI_API_KEY",
+        "CODEX_CLI_COMMAND",
+        "CODEX_CLI_MODEL",
+        "CODEX_CLI_TIMEOUT_SECONDS",
+        "CODEX_CLI_SANDBOX",
+        "CODEX_CLI_CWD",
+    ):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("UDD_DISABLE_CODEX_CLI", "1")
 
 
 @pytest.fixture

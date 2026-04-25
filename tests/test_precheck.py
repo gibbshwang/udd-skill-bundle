@@ -2,6 +2,7 @@ from precheck import build_report
 
 
 def test_build_report_all_good(monkeypatch):
+    monkeypatch.setenv("UDD_DISABLE_CODEX_CLI", "1")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-x")
     report = build_report(
         python_version="3.11.5",
@@ -18,6 +19,7 @@ def test_build_report_all_good(monkeypatch):
 
 
 def test_build_report_missing_playwright(monkeypatch):
+    monkeypatch.setenv("UDD_DISABLE_CODEX_CLI", "1")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -34,6 +36,7 @@ def test_build_report_missing_playwright(monkeypatch):
 
 
 def test_build_report_python_too_old(monkeypatch):
+    monkeypatch.setenv("UDD_DISABLE_CODEX_CLI", "1")
     report = build_report(
         python_version="3.9.0",
         playwright_version="1.48.0",
