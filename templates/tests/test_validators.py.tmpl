@@ -1,0 +1,66 @@
+"""Tests for validators.py."""
+
+from pathlib import Path
+import pandas as pd
+import pytest
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from validators import validate, _detect_format
+
+
+@pytest.fixture
+def base_config():
+    return {
+        "validation": {
+            "min_rows": 1,
+            "expected_columns": ["날짜", "매출"],
+            "size_bounds_kb": [0.01, 1000000],
+            "columns_strict": False,
+        },
+        "download": {"expected_format": "xlsx"},
+    }
+
+
+def test_detect_format_xlsx(tmp_path):
+    assert _detect_format(tmp_path / "a.xlsx") == "xlsx"
+    assert _detect_format(tmp_path / "a.csv") == "csv"
+
+
+def test_validate_missing_file(tmp_path, base_config):
+    report = validate(tmp_path / "missing.xlsx", base_config)
+    assert not report.passed
+    assert any("not found" in i for i in report.issues)
+
+
+def test_validate_wrong_format(tmp_path, base_config):
+    p = tmp_path / "wrong.pdf"
+    p.write_bytes(b"%PDF-1.4\n")
+    report = validate(p, base_config)
+    assert not report.passed
+    assert any("format" in i for i in report.issues)
+
+
+def test_validate_good_xlsx(tmp_path, base_config):
+    p = tmp_path / "good.xlsx"
+    pd.DataFrame({"날짜": ["2026-01-01"], "매출": [1000]}).to_excel(p, index=False)
+    report = validate(p, base_config)
+    assert report.passed
+    assert report.stats["rows"] == 1
+
+
+def test_validate_missing_column_lenient(tmp_path, base_config):
+    p = tmp_path / "nocol.xlsx"
+    pd.DataFrame({"날짜": ["2026-01-01"]}).to_excel(p, index=False)
+    report = validate(p, base_config)
+    assert report.passed  # lenient by default
+    assert any("매출" in w for w in report.warnings)
+
+
+def test_validate_missing_column_strict(tmp_path, base_config):
+    base_config["validation"]["columns_strict"] = True
+    p = tmp_path / "nocol.xlsx"
+    pd.DataFrame({"날짜": ["2026-01-01"]}).to_excel(p, index=False)
+    report = validate(p, base_config)
+    assert not report.passed

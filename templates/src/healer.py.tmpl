@@ -1,0 +1,157 @@
+"""Runtime AI selector healing for {{project_name}}.
+
+Called from navigate.find() when all static selectors fail.
+Caps: 1 heal per element per session, max_ai_retries per session.
+Writes successes back to selectors.yaml under ai_discovered.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import logging
+import re
+from pathlib import Path
+
+import yaml
+from playwright.sync_api import Locator, Page
+
+
+ROOT = Path(__file__).resolve().parent.parent
+log = logging.getLogger("{{project_name}}.healer")
+
+# Session-scoped state
+_SESSION_HEAL_COUNT = 0
+_HEALED_THIS_SESSION: set[str] = set()
+
+
+def _load_config() -> dict:
+    with (ROOT / "config.yaml").open(encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def _compact_dom(page: Page, max_chars: int = 3000) -> str:
+    """Best-effort DOM compression — strips scripts, styles, long attrs."""
+    html = page.content()
+    # Remove script/style blocks
+    html = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.I)
+    html = re.sub(r"<style[^>]*>.*?</style>", "", html, flags=re.DOTALL | re.I)
+    # Collapse whitespace
+    html = re.sub(r"\s+", " ", html)
+    # Truncate
+    if len(html) > max_chars:
+        html = html[: max_chars // 2] + " ...[TRUNCATED]... " + html[-max_chars // 2 :]
+    return html
+
+
+def _is_cooled_down(element_name: str, entry: dict) -> bool:
+    """Check 24h cool-down from last heal attempt."""
+    ai_disc = entry.get("ai_discovered", []) or []
+    if not ai_disc:
+        return True
+    last = ai_disc[-1].get("discovered_at")
+    if not last:
+        return True
+    try:
+        last_dt = dt.datetime.fromisoformat(last.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    hours = _load_config()["healing"].get("cool_down_hours", 24)
+    return dt.datetime.now(last_dt.tzinfo) - last_dt > dt.timedelta(hours=hours)
+
+
+def heal(page: Page, element_name: str) -> Locator | None:
+    """Attempt AI-driven selector recovery. Return Locator on success, None on failure."""
+    global _SESSION_HEAL_COUNT
+
+    config = _load_config()
+    if not config["healing"].get("enabled", True):
+        log.info("heal: disabled by config")
+        return None
+
+    max_retries = config["healing"].get("max_ai_retries", 3)
+    if _SESSION_HEAL_COUNT >= max_retries:
+        log.warning("heal: session retry budget exhausted (%d/%d)",
+                    _SESSION_HEAL_COUNT, max_retries)
+        return None
+
+    if element_name in _HEALED_THIS_SESSION:
+        log.warning("heal: already attempted %s this session", element_name)
+        return None
+
+    from navigate import selectors as sel_factory, save_selectors
+    all_sel = sel_factory()
+    entry = all_sel.get(element_name, {})
+
+    if not _is_cooled_down(element_name, entry):
+        log.warning("heal: %s in cool-down window", element_name)
+        return None
+
+    description = entry.get("description", f"Element named '{element_name}'")
+    try:
+        screenshot = page.screenshot(full_page=False)
+    except Exception:
+        screenshot = None
+    dom = _compact_dom(page)
+
+    prompt = f"""You are a Playwright selector expert.
+
+The automation is trying to locate: "{description}"
+Previous selectors (primary + fallbacks) all failed.
+
+Find the correct element in the current DOM.
+
+<dom>
+{dom}
+</dom>
+
+Respond as JSON only:
+{{"selector": "<Playwright selector>", "confidence": 0.0-1.0, "reasoning": "..."}}
+"""
+
+    try:
+        from llm_client import ask
+        result = ask(prompt, image_bytes=screenshot,
+                     preference=config["healing"].get("ai_provider", "auto"))
+    except Exception as e:
+        log.error("heal: LLM call failed: %s", e)
+        _SESSION_HEAL_COUNT += 1
+        return None
+
+    candidate = result.get("selector")
+    if not candidate:
+        log.warning("heal: no selector in response")
+        _SESSION_HEAL_COUNT += 1
+        return None
+
+    _SESSION_HEAL_COUNT += 1
+    _HEALED_THIS_SESSION.add(element_name)
+
+    try:
+        loc = page.locator(candidate).first
+        if loc.count() == 0:
+            log.warning("heal: candidate %r matches 0 elements", candidate)
+            return None
+    except Exception as e:
+        log.warning("heal: candidate %r raised %s", candidate, e)
+        return None
+
+    # Save to ai_discovered
+    if element_name not in all_sel:
+        all_sel[element_name] = {"description": description, "fallbacks": [], "ai_discovered": []}
+    ai_list = all_sel[element_name].setdefault("ai_discovered", [])
+    ai_list.append({
+        "selector": candidate,
+        "discovered_at": dt.datetime.now().astimezone().isoformat(),
+        "success_count": 1,
+        "reasoning": result.get("reasoning", ""),
+    })
+    save_selectors(all_sel)
+
+    from notify import send_heal_event
+    try:
+        send_heal_event(element_name, candidate, result.get("reasoning", ""))
+    except Exception as e:
+        log.debug("heal: notify failed: %s", e)
+
+    log.info("heal: SUCCESS %s -> %s", element_name, candidate)
+    return loc

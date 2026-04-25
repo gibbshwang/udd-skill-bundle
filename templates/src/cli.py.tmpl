@@ -1,0 +1,252 @@
+"""`udd` CLI for {{project_name}}.
+
+Subcommands:
+  login / run / test / status / logs / doctor /
+  schedule / unschedule / retrain / notify-test / clean / export / import
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+from pathlib import Path
+
+
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+for _stream in (sys.stdout, sys.stderr):
+    _reconf = getattr(_stream, "reconfigure", None)
+    if _reconf:
+        try:
+            _reconf(encoding="utf-8")
+        except Exception:
+            pass
+
+
+ROOT = Path(__file__).resolve().parent.parent
+SKILL_BIN = Path.home() / ".claude" / "skills" / "udd" / "scripts"
+
+
+def _subprocess_env(extra: dict | None = None) -> dict:
+    """Inherit env + force PYTHONIOENCODING=utf-8 for child Python processes.
+
+    Without this, spawned scripts on Windows inherit the cp949 code page and
+    UnicodeEncodeError kills any print() that includes Korean text.
+    """
+    env = os.environ.copy()
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    if extra:
+        env.update(extra)
+    return env
+
+
+def _py() -> str:
+    if sys.platform == "win32":
+        return str(ROOT / ".venv" / "Scripts" / "python.exe")
+    return str(ROOT / ".venv" / "bin" / "python")
+
+
+def cmd_login(args):
+    return subprocess.call([_py(), str(SKILL_BIN / "auth_flow.py"), str(ROOT), "--mode", "save"],
+                           env=_subprocess_env())
+
+
+def cmd_run(args):
+    env_flags = [] if args.healing else ["--no-healing"]
+    return subprocess.call([_py(), str(ROOT / "src" / "run.py"), *env_flags],
+                           env=_subprocess_env())
+
+
+def cmd_test(args):
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="udd-test-") as tmp:
+        env = _subprocess_env({"UDD_DOWNLOAD_OVERRIDE": tmp})
+        return subprocess.call([_py(), str(ROOT / "src" / "run.py")], env=env)
+
+
+def cmd_status(args):
+    logs_dir = ROOT / "logs"
+    if not logs_dir.exists():
+        print("No runs yet.")
+        return 0
+    print(f"Project: {ROOT.name}")
+    print("Last 7 days:")
+    today = dt.date.today()
+    for i in range(7):
+        d = today - dt.timedelta(days=i)
+        log_path = logs_dir / f"{d.isoformat()}.log"
+        if not log_path.exists():
+            continue
+        events = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
+        final = next((e for e in reversed(events) if e.get("event") in ("run.error", "validate.done")), None)
+        if final:
+            mark = "✅" if final.get("passed") else "❌"
+            print(f"  {mark} {d.isoformat()}  {final.get('event')}")
+    return 0
+
+
+def cmd_logs(args):
+    logs_dir = ROOT / "logs"
+    all_lines: list[str] = []
+    for log_file in sorted(logs_dir.glob("*.log"), reverse=True):
+        all_lines += log_file.read_text().splitlines()
+        if args.tail and len(all_lines) >= args.tail:
+            break
+    lines = all_lines[: args.tail] if args.tail else all_lines
+    for line in lines:
+        if args.event:
+            try:
+                obj = json.loads(line)
+                if obj.get("event") != args.event:
+                    continue
+            except json.JSONDecodeError:
+                continue
+        print(line)
+    return 0
+
+
+def cmd_doctor(args):
+    print("🔍 Running diagnostics...")
+    precheck = subprocess.run([_py(), str(SKILL_BIN / "precheck.py")],
+                              capture_output=True, text=True, env=_subprocess_env())
+    print(precheck.stdout)
+    # Verify session
+    verify = subprocess.run([_py(), str(SKILL_BIN / "auth_flow.py"), str(ROOT), "--mode", "verify"],
+                            capture_output=True, text=True, env=_subprocess_env())
+    print("Session valid." if verify.returncode == 0 else "Session INVALID — run `udd login`.")
+    return 0
+
+
+def cmd_schedule(args):
+    return subprocess.call([_py(), str(SKILL_BIN / "schedule_install.py"), str(ROOT)],
+                           env=_subprocess_env())
+
+
+def cmd_unschedule(args):
+    return subprocess.call([_py(), str(SKILL_BIN / "schedule_install.py"), str(ROOT), "--uninstall"],
+                           env=_subprocess_env())
+
+
+def cmd_retrain(args):
+    print("⚠️  Retrain will overwrite selectors.yaml + src/navigate.py.")
+    if not args.yes:
+        confirm = input("Continue? (YES/no): ").strip()
+        if confirm != "YES":
+            print("Cancelled.")
+            return 1
+    backup = ROOT / "recordings" / f"backup-{dt.date.today().isoformat()}"
+    backup.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / "selectors.yaml", backup / "selectors.yaml")
+    shutil.copy2(ROOT / "src" / "navigate.py", backup / "navigate.py")
+    subprocess.call([_py(), str(SKILL_BIN / "record_flow.py"), str(ROOT)], env=_subprocess_env())
+    subprocess.call([_py(), str(SKILL_BIN / "refactor.py"), str(ROOT)], env=_subprocess_env())
+    return subprocess.call([_py(), str(SKILL_BIN / "validate_loop.py"), str(ROOT)], env=_subprocess_env())
+
+
+def cmd_notify_test(args):
+    import yaml
+    from notify import _send
+    with (ROOT / "config.yaml").open(encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    ok = _send(config, f"🔔 Test notification from {config['project']['name']}")
+    print("Sent." if ok else "Failed.")
+    return 0 if ok else 1
+
+
+def cmd_clean(args):
+    keep = dt.date.today() - dt.timedelta(days=args.keep_days)
+    removed = []
+    for sub in ("downloads", "logs"):
+        for d in (ROOT / sub).glob("*"):
+            if d.is_dir():
+                try:
+                    when = dt.date.fromisoformat(d.name)
+                except ValueError:
+                    continue
+                if when < keep:
+                    if args.dry_run:
+                        print(f"would remove: {d}")
+                    else:
+                        shutil.rmtree(d)
+                    removed.append(d)
+    print(f"{len(removed)} directories {'would be ' if args.dry_run else ''}removed.")
+    return 0
+
+
+def cmd_export(args):
+    out = Path(args.out).resolve()
+    include = ["config.yaml", "selectors.yaml", "src", "recordings",
+               "pyproject.toml", "requirements.txt", "README.md", "tests"]
+    with tarfile.open(out, "w:gz") as tar:
+        for name in include:
+            p = ROOT / name
+            if p.exists():
+                tar.add(p, arcname=f"{ROOT.name}/{name}")
+    print(f"Exported to {out}")
+    return 0
+
+
+def cmd_import(args):
+    src = Path(args.src).resolve()
+    dst = Path(args.dst).resolve()
+    dst.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(src, "r:gz") as tar:
+        tar.extractall(dst)
+    print(f"Extracted to {dst}")
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="udd")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("login", help="Refresh session (open browser)")
+
+    p_run = sub.add_parser("run", help="Execute once")
+    p_run.add_argument("--no-healing", dest="healing", action="store_false", default=True)
+
+    sub.add_parser("test", help="Dry-run into /tmp")
+    sub.add_parser("status", help="Show recent runs")
+
+    p_logs = sub.add_parser("logs", help="Tail logs")
+    p_logs.add_argument("--tail", type=int, default=50)
+    p_logs.add_argument("--event", help="Filter by event type")
+
+    sub.add_parser("doctor", help="Full diagnostics")
+    sub.add_parser("schedule", help="Register OS scheduler task")
+    sub.add_parser("unschedule", help="Remove OS scheduler task")
+
+    p_retrain = sub.add_parser("retrain", help="Re-capture selectors (WARNING: overwrites)")
+    p_retrain.add_argument("--yes", action="store_true")
+
+    sub.add_parser("notify-test", help="Send test telegram message")
+
+    p_clean = sub.add_parser("clean", help="Remove old downloads/logs")
+    p_clean.add_argument("--keep-days", type=int, default=30)
+    p_clean.add_argument("--dry-run", action="store_true")
+
+    p_export = sub.add_parser("export", help="Backup config as tar.gz")
+    p_export.add_argument("out")
+
+    p_import = sub.add_parser("import", help="Restore from tar.gz")
+    p_import.add_argument("src")
+    p_import.add_argument("dst")
+
+    args = parser.parse_args()
+    handlers = {
+        "login": cmd_login, "run": cmd_run, "test": cmd_test,
+        "status": cmd_status, "logs": cmd_logs, "doctor": cmd_doctor,
+        "schedule": cmd_schedule, "unschedule": cmd_unschedule,
+        "retrain": cmd_retrain, "notify-test": cmd_notify_test,
+        "clean": cmd_clean, "export": cmd_export, "import": cmd_import,
+    }
+    return handlers[args.command](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,52 @@
+project:
+  name: {{project_name}}
+  url: {{url}}
+  description: {{description}}
+
+auth:
+  mode: session_replay
+  storage_state: auth/storage.json
+  session_ttl_check: daily
+
+filters:
+  start_date: "{today-30d}"
+  end_date: "{today}"
+
+download:
+  save_dir: "downloads/{YYYY-MM-DD}/"
+  expected_format: xlsx
+  timeout_ms: 60000
+
+validation:
+  min_rows: 1
+  expected_columns: []
+  size_bounds_kb: [1, 51200]
+  columns_strict: false
+
+healing:
+  enabled: true
+  max_ai_retries: 3
+  dev_max_attempts: 5
+  ai_provider: auto
+  promote_after: 10
+  cool_down_hours: 24
+  allow_logic_patches: false
+
+schedule:
+  cron: "{{cron}}"
+  enabled: true
+  os_task_name: "UDD-{{project_name_upper}}"
+
+notify:
+  telegram:
+    enabled: false
+    chat_id: ""
+    bot_token_keyring: udd-telegram/bot_token
+  on_success: false
+  on_failure: true
+  on_healing: true
+  on_validation_warning: true
+
+logging:
+  level: INFO
+  retention_days: 90

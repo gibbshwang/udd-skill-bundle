@@ -1,0 +1,27 @@
+[project]
+name = "udd-{{project_name}}"
+version = "0.1.0"
+description = "{{description}}"
+requires-python = ">=3.10"
+authors = [{name = "gibbs hwang"}]
+dependencies = [
+  "playwright>=1.48",
+  "pyyaml>=6.0",
+  "pandas>=2.2",
+  "openpyxl>=3.1",
+  "keyring>=25.0",
+  "requests>=2.32",
+]
+
+[project.optional-dependencies]
+claude = ["anthropic>=0.40"]
+gemini = ["google-generativeai>=0.8"]
+openai = ["openai>=1.50"]
+dev = ["pytest>=8.0", "pytest-mock>=3.12"]
+
+[project.scripts]
+udd = "cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

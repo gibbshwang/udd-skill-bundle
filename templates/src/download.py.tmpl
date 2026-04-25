@@ -1,0 +1,41 @@
+"""File download trigger + save path resolution for {{project_name}}."""
+
+from __future__ import annotations
+
+import datetime as dt
+from pathlib import Path
+
+from playwright.sync_api import Page
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def resolve_save_dir(config: dict) -> Path:
+    """Expand {YYYY-MM-DD} in config.download.save_dir."""
+    template = config["download"]["save_dir"]
+    today = dt.date.today().isoformat()
+    path = template.replace("{YYYY-MM-DD}", today)
+    save_dir = ROOT / path
+    save_dir.mkdir(parents=True, exist_ok=True)
+    return save_dir
+
+
+def trigger_download(page: Page, button_name: str, config: dict) -> Path:
+    """Click the download-trigger element and save the file.
+
+    button_name is a selectors.yaml key (e.g., 'download_excel_button').
+    """
+    from navigate import find
+
+    timeout_ms = config["download"].get("timeout_ms", 60000)
+    save_dir = resolve_save_dir(config)
+
+    with page.expect_download(timeout=timeout_ms) as dl_info:
+        find(page, button_name).click()
+    download = dl_info.value
+
+    suggested = download.suggested_filename or "download.bin"
+    save_path = save_dir / suggested
+    download.save_as(str(save_path))
+    return save_path

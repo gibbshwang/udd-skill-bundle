@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Multi-project management for AX Universal Data Downloader."""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+PROJECTS_ROOT = Path.home() / "ax-downloads"
+
+
+def list_projects() -> list[Path]:
+    if not PROJECTS_ROOT.exists():
+        return []
+    return sorted(
+        p for p in PROJECTS_ROOT.iterdir()
+        if p.is_dir() and (p / "config.yaml").exists()
+    )
+
+
+def cmd_list(args):
+    projects = list_projects()
+    if not projects:
+        print("(no projects in ~/ax-downloads/)")
+        return 0
+    import yaml
+    for p in projects:
+        try:
+            cfg = yaml.safe_load((p / "config.yaml").read_text(encoding="utf-8"))
+            cron = cfg["schedule"]["cron"]
+            enabled = cfg["schedule"].get("enabled", True)
+            mark = "✅" if enabled else "⏸"
+        except Exception:
+            cron, mark = "?", "❓"
+        print(f"{mark} {p.name:<30}  cron={cron}")
+    return 0
+
+
+def cmd_status_all(args):
+    for p in list_projects():
+        print(f"\n=== {p.name} ===")
+        subprocess.run([str(p / ".venv" / ("Scripts" if sys.platform == "win32" else "bin") / "python"),
+                        str(p / "src" / "cli.py"), "status"])
+    return 0
+
+
+def cmd_doctor_all(args):
+    for p in list_projects():
+        print(f"\n=== {p.name} ===")
+        subprocess.run([str(p / ".venv" / ("Scripts" if sys.platform == "win32" else "bin") / "python"),
+                        str(p / "src" / "cli.py"), "doctor"])
+    return 0
+
+
+def cmd_run(args):
+    p = PROJECTS_ROOT / args.project
+    if not p.exists():
+        print(f"No such project: {args.project}", file=sys.stderr)
+        return 1
+    return subprocess.call([str(p / ".venv" / ("Scripts" if sys.platform == "win32" else "bin") / "python"),
+                            str(p / "src" / "cli.py"), "run"])
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="udd-global")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("list")
+    sub.add_parser("status-all")
+    sub.add_parser("doctor-all")
+    p_run = sub.add_parser("run")
+    p_run.add_argument("project")
+
+    args = parser.parse_args()
+    handlers = {"list": cmd_list, "status-all": cmd_status_all,
+                "doctor-all": cmd_doctor_all, "run": cmd_run}
+    return handlers[args.command](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

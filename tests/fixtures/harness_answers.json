@@ -1,0 +1,8 @@
+{
+  "slug": "harness-smoke",
+  "url": "https://example.com/login",
+  "site_type": "authenticated_browser",
+  "description": "Harness smoke test",
+  "schedule": "0 9 * * *",
+  "expected_columns": ""
+}

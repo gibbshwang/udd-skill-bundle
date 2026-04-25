@@ -1,0 +1,97 @@
+"""Healer tests — mocks llm_client and page. No real API calls."""
+
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+# Reload module to reset session state between tests
+@pytest.fixture(autouse=True)
+def reset_healer(monkeypatch):
+    import healer
+    healer._SESSION_HEAL_COUNT = 0
+    healer._HEALED_THIS_SESSION.clear()
+
+
+def _make_page(selector_to_match: str | None):
+    page = MagicMock()
+    page.content.return_value = "<html><body><button id='x'>X</button></body></html>"
+    page.screenshot.return_value = b""
+    if selector_to_match is None:
+        page.locator.return_value.count.return_value = 0
+    else:
+        loc = MagicMock()
+        loc.first = loc
+        loc.count.return_value = 1
+        page.locator.return_value = loc
+    return page
+
+
+def _patch_config(monkeypatch, tmp_path, healing_overrides: dict | None = None):
+    """Write a minimal config.yaml + empty selectors.yaml so healer can load them."""
+    import healer, navigate
+    config = {
+        "healing": {"enabled": True, "max_ai_retries": 3, "ai_provider": "auto",
+                    "cool_down_hours": 24},
+    }
+    if healing_overrides:
+        config["healing"].update(healing_overrides)
+    monkeypatch.setattr(healer, "_load_config", lambda: config)
+    monkeypatch.setattr(navigate, "_SELECTORS_CACHE", {})
+    monkeypatch.setattr(navigate, "save_selectors", lambda d: None)
+
+
+def test_heal_disabled_returns_none(monkeypatch, tmp_path):
+    import healer
+    _patch_config(monkeypatch, tmp_path, {"enabled": False})
+    page = _make_page(None)
+    assert healer.heal(page, "foo") is None
+
+
+def test_heal_budget_exhausted(monkeypatch, tmp_path):
+    import healer
+    _patch_config(monkeypatch, tmp_path, {"max_ai_retries": 0})
+    page = _make_page(None)
+    assert healer.heal(page, "foo") is None
+
+
+def test_heal_success(monkeypatch, tmp_path):
+    import healer
+    _patch_config(monkeypatch, tmp_path)
+    page = _make_page("#new-button")
+
+    fake_ask = MagicMock(return_value={"selector": "#new-button", "confidence": 0.9, "reasoning": "looks right"})
+    monkeypatch.setitem(sys.modules, "llm_client", MagicMock(ask=fake_ask))
+    monkeypatch.setitem(sys.modules, "notify", MagicMock(send_heal_event=MagicMock()))
+
+    loc = healer.heal(page, "download_button")
+    assert loc is not None
+    fake_ask.assert_called_once()
+
+
+def test_heal_candidate_matches_zero_returns_none(monkeypatch, tmp_path):
+    import healer
+    _patch_config(monkeypatch, tmp_path)
+    page = _make_page(None)
+
+    fake_ask = MagicMock(return_value={"selector": "#missing", "confidence": 0.5, "reasoning": ""})
+    monkeypatch.setitem(sys.modules, "llm_client", MagicMock(ask=fake_ask))
+    monkeypatch.setitem(sys.modules, "notify", MagicMock(send_heal_event=MagicMock()))
+
+    assert healer.heal(page, "foo") is None
+
+
+def test_heal_same_element_twice_returns_none(monkeypatch, tmp_path):
+    import healer
+    _patch_config(monkeypatch, tmp_path)
+    page = _make_page("#x")
+
+    fake_ask = MagicMock(return_value={"selector": "#x", "confidence": 0.9, "reasoning": ""})
+    monkeypatch.setitem(sys.modules, "llm_client", MagicMock(ask=fake_ask))
+    monkeypatch.setitem(sys.modules, "notify", MagicMock(send_heal_event=MagicMock()))
+
+    assert healer.heal(page, "elem") is not None
+    assert healer.heal(page, "elem") is None  # second call blocked

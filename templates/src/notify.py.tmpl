@@ -1,0 +1,107 @@
+"""Telegram notification for {{project_name}}.
+
+Dispatches summary messages to configured chat based on notify.* rules in config.yaml.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+import keyring
+import requests
+
+
+log = logging.getLogger("{{project_name}}.notify")
+API_BASE = "https://api.telegram.org"
+
+
+def _send(config: dict, text: str, files: list[Path] | None = None) -> bool:
+    nt = config["notify"]["telegram"]
+    if not nt.get("enabled"):
+        return False
+    chat_id = nt.get("chat_id")
+    if not chat_id:
+        log.warning("notify: chat_id not set")
+        return False
+    service, key = nt.get("bot_token_keyring", "udd-telegram/bot_token").split("/", 1)
+    token = keyring.get_password(service, key)
+    if not token:
+        log.warning("notify: bot_token not in keyring %s/%s", service, key)
+        return False
+
+    try:
+        r = requests.post(f"{API_BASE}/bot{token}/sendMessage",
+                          json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+                          timeout=10)
+        r.raise_for_status()
+    except requests.RequestException as e:
+        log.error("notify: send failed: %s", e)
+        return False
+
+    for f in files or []:
+        if not f.exists():
+            continue
+        try:
+            with f.open("rb") as fh:
+                r = requests.post(f"{API_BASE}/bot{token}/sendDocument",
+                                  data={"chat_id": chat_id},
+                                  files={"document": (f.name, fh)}, timeout=30)
+            r.raise_for_status()
+        except requests.RequestException as e:
+            log.error("notify: sendDocument failed: %s", e)
+    return True
+
+
+def send_summary(config: dict, status: str, file_path: Path | None = None,
+                 report=None, error: str | None = None) -> None:
+    project = config["project"]["name"]
+    nt = config["notify"]
+
+    if status == "success":
+        if not nt.get("on_success"):
+            return
+        text = f"✅ *{project}* 다운로드 성공"
+        if file_path and report:
+            text += f"\n파일: `{file_path.name}` ({report.stats.get('size_kb', '?')} KB, {report.stats.get('rows', '?')} rows)"
+        # Attach the actual downloaded file when ``notify.attach_file`` is on
+        # (default true). Lets the user open / forward the data straight from
+        # Telegram instead of remoting into the host that ran the cron.
+        attach = nt.get("attach_file", True)
+        files_to_send = (
+            [file_path] if attach and file_path and Path(file_path).exists() else None
+        )
+        _send(config, text, files=files_to_send)
+        return
+    elif status == "validation_warning":
+        if not nt.get("on_validation_warning", True):
+            return
+        issues = ", ".join(report.issues) if report else ""
+        warns = ", ".join(report.warnings) if report else ""
+        text = f"⚠️ *{project}* 다운로드 OK, 검증 경고\n이슈: {issues}\n경고: {warns}"
+    elif status == "session_expired":
+        text = f"❌ *{project}* 세션 만료. `udd login` 실행 필요."
+    elif status == "failure":
+        text = f"❌ *{project}* 실패\n{error or '(no error message)'}"
+    else:
+        text = f"ℹ️ *{project}* status={status}"
+
+    _send(config, text)
+
+
+def send_heal_event(element_name: str, new_selector: str, reasoning: str) -> None:
+    """Called from healer on successful self-heal."""
+    from pathlib import Path
+    import yaml
+    root = Path(__file__).resolve().parent.parent
+    with (root / "config.yaml").open(encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    if not config["notify"].get("on_healing", True):
+        return
+    project = config["project"]["name"]
+    text = (f"🩹 *{project}* self-healed\n"
+            f"Element: `{element_name}`\n"
+            f"New selector: `{new_selector}`\n"
+            f"Reason: {reasoning[:200]}")
+    _send(config, text)

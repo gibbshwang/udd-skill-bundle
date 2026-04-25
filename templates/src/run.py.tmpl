@@ -1,0 +1,88 @@
+"""Main entrypoint for {{project_name}}.
+
+Called by the OS scheduler (schtasks/launchctl/cron) and by `udd run`.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+
+
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+for _stream in (sys.stdout, sys.stderr):
+    _reconf = getattr(_stream, "reconfigure", None)
+    if _reconf:
+        try:
+            _reconf(encoding="utf-8")
+        except Exception:
+            pass
+
+
+import yaml
+from playwright.sync_api import sync_playwright
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def load_config() -> dict:
+    with (ROOT / "config.yaml").open(encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def log_event(event: dict) -> None:
+    logs_dir = ROOT / "logs"
+    logs_dir.mkdir(exist_ok=True)
+    log_path = logs_dir / f"{datetime.now().strftime('%Y-%m-%d')}.log"
+    event["ts"] = datetime.now().isoformat()
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+def main() -> int:
+    from auth import load_session, is_session_valid
+    from navigate import execute_download
+    from validators import validate
+    from notify import send_summary
+
+    config = load_config()
+    log_event({"event": "run.start", "project": config["project"]["name"]})
+
+    launch_kwargs = {"headless": True}
+    channel = (config.get("auth") or {}).get("browser_channel")
+    if channel:
+        launch_kwargs["channel"] = channel
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(**launch_kwargs)
+        try:
+            context = load_session(browser, config)
+            page = context.new_page()
+
+            if not is_session_valid(page, config):
+                log_event({"event": "session.expired"})
+                send_summary(config, status="session_expired")
+                return 2
+
+            file_path = execute_download(page, config)
+            log_event({"event": "download.saved", "path": str(file_path)})
+
+            report = validate(file_path, config)
+            log_event({"event": "validate.done", "passed": report.passed, "stats": report.stats})
+
+            send_summary(config, status="success" if report.passed else "validation_warning",
+                         file_path=file_path, report=report)
+            return 0 if report.passed else 1
+        except Exception as e:
+            log_event({"event": "run.error", "error": str(e), "type": type(e).__name__})
+            send_summary(config, status="failure", error=str(e))
+            return 3
+        finally:
+            browser.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,28 @@
+"""Selector schema validation for {{project_name}}."""
+
+from pathlib import Path
+import yaml
+
+SELECTORS = Path(__file__).resolve().parent.parent / "selectors.yaml"
+
+
+def test_selectors_file_exists():
+    assert SELECTORS.exists()
+
+
+def test_each_entry_has_required_keys():
+    data = yaml.safe_load(SELECTORS.read_text(encoding="utf-8")) or {}
+    for name, entry in data.items():
+        assert isinstance(entry, dict), f"{name}: must be a mapping"
+        assert "description" in entry, f"{name}: missing description"
+        assert "primary" in entry or entry.get("fallbacks"), \
+            f"{name}: must have either primary or fallbacks"
+
+
+def test_ai_discovered_entries_have_structure():
+    data = yaml.safe_load(SELECTORS.read_text(encoding="utf-8")) or {}
+    for name, entry in data.items():
+        for ai in entry.get("ai_discovered", []) or []:
+            assert "selector" in ai, f"{name}: ai_discovered entry missing 'selector'"
+            assert "discovered_at" in ai, f"{name}: ai_discovered missing 'discovered_at'"
+            assert "success_count" in ai, f"{name}: ai_discovered missing 'success_count'"

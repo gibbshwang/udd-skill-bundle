@@ -1,0 +1,139 @@
+"""Navigation with selector fallback chain + runtime AI healing.
+
+Selectors defined in ../selectors.yaml.
+Each entry has: description, primary, fallbacks, ai_discovered (auto-populated).
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+import yaml
+from playwright.sync_api import Locator, Page, TimeoutError as PWTimeout
+
+
+ROOT = Path(__file__).resolve().parent.parent
+log = logging.getLogger("{{project_name}}.navigate")
+
+
+def load_selectors() -> dict:
+    with (ROOT / "selectors.yaml").open(encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    return data
+
+
+_SELECTORS_CACHE = None
+
+
+def selectors() -> dict:
+    global _SELECTORS_CACHE
+    if _SELECTORS_CACHE is None:
+        _SELECTORS_CACHE = load_selectors()
+    return _SELECTORS_CACHE
+
+
+def save_selectors(data: dict) -> None:
+    """Persist selector updates (used by healing promotion).
+
+    Also refreshes the in-process cache so subsequent ``selectors()`` calls
+    within the same session see the newly-written entries (healer adds
+    ai_discovered records that the next find() attempt should consult).
+    """
+    global _SELECTORS_CACHE
+    with (ROOT / "selectors.yaml").open("w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+    _SELECTORS_CACHE = data
+
+
+def _try(page: Page, selector: str, timeout_ms: int = 3000) -> Locator | None:
+    """Attempt to locate a single element within timeout_ms. Return None on failure."""
+    try:
+        loc = page.locator(selector).first
+        loc.wait_for(state="visible", timeout=timeout_ms)
+        return loc
+    except PWTimeout:
+        return None
+    except Exception as e:
+        log.debug("Selector %r raised %s", selector, e)
+        return None
+
+
+def find(page: Page, name: str, timeout_ms: int = 3000) -> Locator:
+    """Locate element by name using 4-layer defense:
+
+    1. ai_discovered (sorted by success_count descending)
+    2. primary
+    3. fallbacks (in order)
+    4. AI healing (healer.heal) — only if enabled
+    """
+    all_sel = selectors()
+    if name not in all_sel:
+        raise KeyError(f"Unknown selector name: {name!r}. Check selectors.yaml.")
+
+    entry = all_sel[name]
+
+    # Layer 0: ai_discovered
+    ai_list = sorted(entry.get("ai_discovered", []) or [],
+                     key=lambda e: e.get("success_count", 0), reverse=True)
+    for ai in ai_list:
+        loc = _try(page, ai["selector"], timeout_ms)
+        if loc is not None:
+            log.info("navigate: %s via ai_discovered %s", name, ai["selector"])
+            return loc
+
+    # Layer 1: primary
+    primary = entry.get("primary")
+    if primary:
+        loc = _try(page, primary, timeout_ms)
+        if loc is not None:
+            log.debug("navigate: %s via primary", name)
+            return loc
+
+    # Layer 2: fallbacks
+    for fb in entry.get("fallbacks", []) or []:
+        loc = _try(page, fb, timeout_ms)
+        if loc is not None:
+            log.warning("navigate: %s via fallback %s", name, fb)
+            return loc
+
+    # Layer 3: AI healing
+    from healer import heal  # imported here to avoid circular import on generation time
+    loc = heal(page, name)
+    if loc is not None:
+        return loc
+
+    raise ElementNotFoundError(f"All selectors failed for {name!r}.")
+
+
+class ElementNotFoundError(RuntimeError):
+    pass
+
+
+def execute_download(page: Page, config: dict):
+    """Adapter — calls Stage 5-generated ``steps`` and unwraps the path.
+
+    ``steps(page, config)`` returns a dict (Stage 5 LLM contract — see
+    refactor.py PROMPT_TEMPLATE). This adapter exists so run.py can keep its
+    simple ``file_path = execute_download(page, config)`` call site even as
+    the navigate-side contract evolves.
+
+    Falls back to clicking a conventionally-named selector if the user wrote
+    their own navigate.py without a ``steps`` function (rare).
+    """
+    try:
+        result = steps(page, config)
+    except NameError:
+        from download import trigger_download
+        page.goto(config["project"]["url"], wait_until="networkidle")
+        return trigger_download(page, "download_excel_button", config)
+
+    if isinstance(result, dict):
+        path = result.get("download_path")
+        if path is None:
+            raise RuntimeError(
+                "steps() returned dict without 'download_path' key. "
+                "Stage 5 should populate it via download.save_as(...)."
+            )
+        return path
+    return result  # if steps returned a path directly, accept it.

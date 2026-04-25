@@ -1,0 +1,105 @@
+"""File + data validation for {{project_name}}."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import pandas as pd
+
+
+@dataclass
+class ValidationReport:
+    passed: bool
+    issues: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    stats: dict = field(default_factory=dict)
+
+
+def _detect_format(path: Path) -> str:
+    suffix = path.suffix.lower().lstrip(".")
+    if suffix in {"xlsx", "xlsm"}: return "xlsx"
+    if suffix == "csv": return "csv"
+    if suffix == "xls": return "xls"
+    return suffix or "unknown"
+
+
+_CSV_ENCODINGS = ("utf-8-sig", "utf-8", "cp949", "euc-kr", "latin-1")
+
+
+def _read_csv_multi_encoding(path: Path) -> pd.DataFrame:
+    """Korean government / enterprise CSVs are routinely emitted as cp949
+    or euc-kr, not utf-8. Try the common encodings in order before giving up.
+    """
+    last_err: Exception | None = None
+    for enc in _CSV_ENCODINGS:
+        try:
+            return pd.read_csv(path, encoding=enc)
+        except UnicodeDecodeError as e:
+            last_err = e
+            continue
+    raise UnicodeDecodeError(
+        f"none of {_CSV_ENCODINGS} could decode {path.name!r}: {last_err}"
+    )
+
+
+def _load(path: Path, fmt: str) -> pd.DataFrame:
+    if fmt in {"xlsx", "xls", "xlsm"}:
+        return pd.read_excel(path)
+    if fmt == "csv":
+        return _read_csv_multi_encoding(path)
+    raise ValueError(f"Unsupported format: {fmt!r}")
+
+
+def validate(path: Path, config: dict) -> ValidationReport:
+    rules = config["validation"]
+    expected_fmt = config["download"]["expected_format"]
+    report = ValidationReport(passed=True)
+
+    if not path.exists():
+        report.passed = False
+        report.issues.append(f"File not found: {path}")
+        return report
+
+    size_kb = path.stat().st_size / 1024
+    report.stats["size_kb"] = round(size_kb, 2)
+    lo, hi = rules.get("size_bounds_kb", [0, 10 ** 9])
+    if size_kb < lo:
+        report.passed = False
+        report.issues.append(f"File too small: {size_kb:.1f} KB < {lo} KB")
+    if size_kb > hi:
+        report.warnings.append(f"File larger than expected: {size_kb:.1f} KB > {hi} KB")
+
+    fmt = _detect_format(path)
+    report.stats["format"] = fmt
+    if fmt != expected_fmt:
+        report.passed = False
+        report.issues.append(f"Expected format {expected_fmt!r}, got {fmt!r}")
+        return report
+
+    try:
+        df = _load(path, fmt)
+    except Exception as e:
+        report.passed = False
+        report.issues.append(f"Failed to parse {fmt}: {e}")
+        return report
+
+    report.stats["rows"] = len(df)
+    report.stats["columns"] = list(df.columns)
+
+    if len(df) < rules.get("min_rows", 1):
+        report.passed = False
+        report.issues.append(f"Row count {len(df)} < min_rows {rules['min_rows']}")
+
+    expected_cols = rules.get("expected_columns", [])
+    if expected_cols:
+        missing = [c for c in expected_cols if c not in df.columns]
+        if missing:
+            msg = f"Missing columns: {missing}"
+            if rules.get("columns_strict", False):
+                report.passed = False
+                report.issues.append(msg)
+            else:
+                report.warnings.append(msg)
+
+    return report
