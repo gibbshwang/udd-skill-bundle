@@ -1,8 +1,14 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from lib.llm_call import _extract_anthropic_text, detect_provider_from_env, NoProviderError
+from lib.llm_call import (
+    _ask_codex_cli,
+    _extract_anthropic_text,
+    detect_provider_from_env,
+    NoProviderError,
+)
 
 
 def test_detect_auto_picks_codex_cli_first(clear_ai_env, monkeypatch):
@@ -41,6 +47,33 @@ def test_detect_explicit_forces_choice(clear_ai_env, monkeypatch):
 def test_detect_none_raises(clear_ai_env):
     with pytest.raises(NoProviderError):
         detect_provider_from_env("auto")
+
+
+def test_codex_cli_uses_global_approval_without_output_schema(clear_ai_env, monkeypatch):
+    command = "codex.cmd"
+    monkeypatch.setenv("CODEX_CLI_COMMAND", command)
+    monkeypatch.setenv("CODEX_CLI_CWD", str(Path.cwd()))
+    monkeypatch.setenv("CODEX_CLI_TMPDIR", str(Path.cwd() / ".udd" / "pytest-codex-cli-tmp"))
+    monkeypatch.setenv("CODEX_CLI_TIMEOUT_SECONDS", "5")
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["input"] = kwargs["input"]
+        result_path = cmd[cmd.index("--output-last-message") + 1]
+        Path(result_path).write_text('{"ok": true}', encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("lib.llm_call.subprocess.run", fake_run)
+
+    assert _ask_codex_cli("Return JSON.", None, None, 64) == {"ok": True}
+    cmd = captured["cmd"]
+    assert cmd[:4] == [command, "-a", "never", "exec"]
+    assert "--ask-for-approval" not in cmd
+    assert "--output-schema" not in cmd
+    assert "--output-last-message" in cmd
+    assert "Return only a JSON object" in captured["input"]
 
 
 def _block(type_: str, **kwargs):

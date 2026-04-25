@@ -3,7 +3,7 @@ from lib.platform_detect import detect_os, detect_cli_host, detect_autonomous_mo
 
 CLAUDE_VARS = ("CLAUDECODE", "CLAUDE_CODE_VERSION", "CLAUDE_SESSION_ID")
 GEMINI_VARS = ("GEMINI_CLI", "GEMINI_CLI_VERSION")
-CODEX_VARS = ("CODEX_CLI_VERSION",)
+CODEX_VARS = ("CODEX_CLI_VERSION", "CODEX_THREAD_ID", "CODEX_MANAGED_BY_NPM")
 ALL_HOST_VARS = CLAUDE_VARS + GEMINI_VARS + CODEX_VARS
 
 
@@ -65,6 +65,11 @@ def test_detect_autonomous_mode_codex(monkeypatch):
 
 
 def test_detect_autonomous_mode_off(monkeypatch):
-    for var in ("CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS", "GEMINI_YOLO", "CODEX_APPROVAL_MODE"):
+    for var in (
+        "CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS",
+        "GEMINI_YOLO",
+        "CODEX_APPROVAL_MODE",
+        "CODEX_THREAD_ID",
+    ):
         monkeypatch.delenv(var, raising=False)
     assert detect_autonomous_mode() is False

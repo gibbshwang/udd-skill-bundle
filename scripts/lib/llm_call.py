@@ -14,7 +14,7 @@ import json
 import os
 import shutil
 import subprocess
-import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -99,10 +99,11 @@ def _codex_cli_available() -> bool:
     return _find_codex_cli_command() is not None
 
 
-def _codex_json_schema() -> dict[str, Any]:
-    # Generic object schema. Stage 5, Stage 6, and runtime healing each ask for
-    # different keys, so the prompt owns the precise response contract.
-    return {"type": "object", "additionalProperties": True}
+def _codex_temp_root(cwd: str | Path | None = None) -> Path:
+    override = os.environ.get("CODEX_CLI_TMPDIR")
+    root = Path(override) if override else Path(cwd or os.getcwd()) / ".udd" / "tmp"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def _ask_codex_cli(
@@ -126,23 +127,20 @@ def _ask_codex_cli(
         + f"\nKeep the response concise. Max output tokens requested by caller: {max_tokens}."
     )
 
-    with tempfile.TemporaryDirectory(prefix="udd-codex-cli-") as tmp:
-        tmp_path = Path(tmp)
-        schema_path = tmp_path / "schema.json"
+    tmp_path = _codex_temp_root(cwd) / f"udd-codex-cli-{uuid.uuid4().hex}"
+    tmp_path.mkdir(parents=True, exist_ok=False)
+    try:
         result_path = tmp_path / "result.json"
-        schema_path.write_text(json.dumps(_codex_json_schema()), encoding="utf-8")
 
         cmd = [
             command,
+            "-a",
+            "never",
             "exec",
             "--skip-git-repo-check",
             "--ephemeral",
             "--sandbox",
             sandbox,
-            "--ask-for-approval",
-            "never",
-            "--output-schema",
-            str(schema_path),
             "--output-last-message",
             str(result_path),
             "-C",
@@ -173,6 +171,8 @@ def _ask_codex_cli(
 
         text = result_path.read_text(encoding="utf-8") if result_path.exists() else result.stdout
         return _parse_json(text)
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
 
 
 def _ask_anthropic(prompt: str, image_bytes: bytes | None, model: str, max_tokens: int) -> dict:

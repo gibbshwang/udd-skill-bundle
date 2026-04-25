@@ -26,6 +26,7 @@ def clear_ai_env(monkeypatch):
         "CODEX_CLI_TIMEOUT_SECONDS",
         "CODEX_CLI_SANDBOX",
         "CODEX_CLI_CWD",
+        "CODEX_CLI_TMPDIR",
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("UDD_DISABLE_CODEX_CLI", "1")
@@ -42,6 +43,8 @@ def clear_cli_env(monkeypatch):
         "CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS",
         "GEMINI_YOLO",
         "CODEX_APPROVAL_MODE",
+        "CODEX_THREAD_ID",
+        "CODEX_MANAGED_BY_NPM",
     ):
         monkeypatch.delenv(var, raising=False)
 
