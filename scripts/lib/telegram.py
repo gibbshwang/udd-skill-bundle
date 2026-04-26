@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import keyring
@@ -14,6 +15,13 @@ log = logging.getLogger("udd.telegram")
 KEYRING_SERVICE = "udd-telegram"
 KEYRING_KEY = "bot_token"
 API_BASE = "https://api.telegram.org"
+
+_TOKEN_URL_RE = re.compile(r"(api\.telegram\.org/bot)[^/\s]+")
+
+
+def _redact(text: str) -> str:
+    """Redact bot tokens from Telegram URLs in error/log messages."""
+    return _TOKEN_URL_RE.sub(r"\1<REDACTED>", text)
 
 
 def get_token() -> str | None:
@@ -31,7 +39,7 @@ def send(chat_id: str, text: str, files: list[Path] | None = None) -> bool:
         r = requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}, timeout=10)
         r.raise_for_status()
     except requests.RequestException as e:
-        log.error("Telegram send failed: %s", e)
+        log.error("Telegram send failed: %s", _redact(str(e)))
         return False
 
     for path in files or []:
@@ -44,6 +52,6 @@ def send(chat_id: str, text: str, files: list[Path] | None = None) -> bool:
                                   files={"document": (path.name, f)}, timeout=30)
             r.raise_for_status()
         except requests.RequestException as e:
-            log.error("Telegram sendDocument failed: %s", e)
+            log.error("Telegram sendDocument failed: %s", _redact(str(e)))
 
     return True

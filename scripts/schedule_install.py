@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import plistlib
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -108,9 +109,11 @@ def install_macos(project_dir: Path, config: dict) -> bool:
 
 def install_linux(project_dir: Path, config: dict) -> bool:
     marker = f"UDD-{config['project']['name']}"
+    py = _python_exe(project_dir)
+    run_script = str(project_dir / "src" / "run.py")
     cron_line = (
         f"{config['schedule']['cron']} "
-        f"{_python_exe(project_dir)} {project_dir / 'src' / 'run.py'} "
+        f"{shlex.quote(py)} {shlex.quote(run_script)} "
         f"# {marker}"
     )
 
