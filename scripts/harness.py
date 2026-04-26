@@ -139,18 +139,52 @@ def tail(value: str | None, limit: int = 4000) -> str:
     return (value or "")[-limit:]
 
 
-def run_command(command: list[str], cwd: Path | None = None) -> dict[str, Any]:
+# Per-stage timeout (seconds). Interactive stages (auth_setup, record) need
+# the long ceiling because the user is driving a real browser; non-interactive
+# stages should fail fast if they hang.
+STAGE_TIMEOUTS: dict[str, int] = {
+    "precheck": 120,
+    "scope": 120,
+    "scaffold": 1800,       # venv + browser install can take a while
+    "auth_setup": 2700,     # 45 min — user-driven login
+    "record": 2700,         # 45 min — user-driven recording
+    "refactor": 600,
+    "validate": 1200,
+    "approve": 600,
+    "schedule": 120,
+    "handoff": 120,
+}
+DEFAULT_TIMEOUT = 600
+
+
+def run_command(
+    command: list[str],
+    cwd: Path | None = None,
+    timeout: int | None = DEFAULT_TIMEOUT,
+) -> dict[str, Any]:
     env = os.environ.copy()
     env.setdefault("PYTHONIOENCODING", "utf-8")
-    result = subprocess.run(
-        command,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=env,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        stdout_text = e.stdout if isinstance(e.stdout, str) else (e.stdout.decode("utf-8", "replace") if e.stdout else "")
+        stderr_text = e.stderr if isinstance(e.stderr, str) else (e.stderr.decode("utf-8", "replace") if e.stderr else "")
+        return {
+            "command": command,
+            "exit_code": 124,  # GNU coreutils convention for timeout
+            "stdout_tail": tail(stdout_text),
+            "stderr_tail": tail(stderr_text + f"\n[harness] subprocess timed out after {timeout}s"),
+            "timed_out": True,
+        }
     return {
         "command": command,
         "exit_code": result.returncode,
@@ -246,7 +280,10 @@ def patch_scope_metadata(project_dir: Path, answers: dict[str, str]) -> None:
 
 
 def stage_precheck(project_dir: Path, state: dict[str, Any]) -> int:
-    result = run_command([sys.executable, str(scripts_dir() / "precheck.py")])
+    result = run_command(
+        [sys.executable, str(scripts_dir() / "precheck.py")],
+        timeout=STAGE_TIMEOUTS.get("precheck", DEFAULT_TIMEOUT),
+    )
     append_stage(project_dir, state, "precheck", result)
     print(result["stdout_tail"])
     return result["exit_code"]
@@ -271,15 +308,44 @@ def stage_scope(project_dir: Path, state: dict[str, Any], args: argparse.Namespa
     ]
     env = os.environ.copy()
     env.setdefault("PYTHONIOENCODING", "utf-8")
-    completed = subprocess.run(
-        command,
-        input=payload,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=env,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            input=payload,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=STAGE_TIMEOUTS.get("scope", DEFAULT_TIMEOUT),
+        )
+    except subprocess.TimeoutExpired as e:
+        stdout_text = e.stdout if isinstance(e.stdout, str) else (e.stdout.decode("utf-8", "replace") if e.stdout else "")
+        stderr_text = e.stderr if isinstance(e.stderr, str) else (e.stderr.decode("utf-8", "replace") if e.stderr else "")
+        result = {
+            "command": command,
+            "exit_code": 124,
+            "stdout_tail": tail(stdout_text),
+            "stderr_tail": tail(stderr_text + f"\n[harness] scope stage timed out"),
+            "timed_out": True,
+        }
+        intake_source = "answers_file" if args.answers_file else "interactive"
+        append_stage(
+            project_dir,
+            state,
+            "scope",
+            result,
+            user_input={
+                "source": intake_source,
+                "slug": answers["slug"],
+                "url": answers["url"],
+                "site_type": answers["site_type"],
+                "description": answers["description"],
+                "schedule": answers["schedule"],
+                "expected_columns": answers["expected_columns"],
+            },
+        )
+        return result["exit_code"]
     result = {
         "command": command,
         "exit_code": completed.returncode,
@@ -325,7 +391,7 @@ def stage_scaffold(project_dir: Path, state: dict[str, Any], args: argparse.Name
         command.append("--no-git")
         degraded = True
         notes = (notes + " " if notes else "") + "Skipped git initialization at caller request."
-    result = run_command(command)
+    result = run_command(command, timeout=STAGE_TIMEOUTS.get("scaffold", DEFAULT_TIMEOUT))
     append_stage(project_dir, state, "scaffold", result, degraded=degraded, notes=notes)
     return result["exit_code"]
 
@@ -355,7 +421,11 @@ def stage_command(project_dir: Path, stage: str, args: argparse.Namespace) -> li
 
 def run_later_stage(project_dir: Path, state: dict[str, Any], stage: str, args: argparse.Namespace) -> int:
     command = stage_command(project_dir, stage, args)
-    result = run_command(command, cwd=project_dir)
+    result = run_command(
+        command,
+        cwd=project_dir,
+        timeout=STAGE_TIMEOUTS.get(stage, DEFAULT_TIMEOUT),
+    )
     append_stage(project_dir, state, stage, result)
     print(result["stdout_tail"])
     if result["stderr_tail"]:
