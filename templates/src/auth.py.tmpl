@@ -51,9 +51,21 @@ def load_session(browser: Browser, config: dict) -> BrowserContext:
 
 
 def is_session_valid(page: Page, config: dict) -> bool:
-    """Visit the login URL. If not redirected to login page, session is valid."""
+    """Visit the entry URL and decide whether the session is still authenticated.
+
+    Heuristic: a visible password input (`input[type="password"]`) on the
+    landing page strongly implies we were bounced to a login form. This avoids
+    URL-substring false positives (e.g. `/admin/login-history`).
+    """
     url = config["project"]["url"]
-    page.goto(url, wait_until="domcontentloaded")
-    current = page.url
-    # Heuristic: login pages typically contain 'login' in URL
-    return "login" not in current.lower() or current == url
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=15000)
+    except Exception:
+        return False
+    try:
+        pw_count = page.locator('input[type="password"]').count()
+    except Exception:
+        # If the locator query itself fails, fall back to "not valid" rather
+        # than silently treating an error as success.
+        return False
+    return pw_count == 0
